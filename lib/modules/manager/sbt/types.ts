@@ -1,11 +1,19 @@
-export interface ParseContext {
-  scalaVersion?: string | null;
-  variables: Record<string, any>;
-  depType?: string;
-}
+export type VariableContext = {
+  val: string;
+  sourceFile: string;
+  lineIndex: number;
+};
+export type Variables = Record<string, VariableContext>;
+
+export type GroupFilenameContent = Record<
+  string,
+  { packageFile: string; content: string }[]
+>;
 
 export interface ParseOptions {
+  packageFile?: string;
   isMultiDeps?: boolean;
   scalaVersion?: string | null;
-  variables?: Record<string, any>;
+  variables?: Variables;
+  readonly globalVariables?: Variables;
 }

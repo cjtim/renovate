@@ -4,8 +4,8 @@ import { SbtPackageDatasource } from '../../datasource/sbt-package';
 import { SbtPluginDatasource } from '../../datasource/sbt-plugin';
 import * as ivyVersioning from '../../versioning/ivy';
 
-export { extractPackageFile } from './extract';
-export { bumpPackageVersion } from './update';
+export { extractAllPackageFiles } from './extract';
+export { bumpPackageVersion, updateDependency } from './update';
 
 export const supportedDatasources = [
   MavenDatasource.id,
