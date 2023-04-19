@@ -16,7 +16,12 @@ import * as mavenVersioning from '../../versioning/maven';
 import * as semverVersioning from '../../versioning/semver';
 import { REGISTRY_URLS } from '../gradle/parser/common';
 import type { ExtractConfig, PackageDependency, PackageFile } from '../types';
-import type { GroupFilenameContent, ParseOptions, Variables } from './types';
+import type {
+  GroupFilenameContent,
+  ParseOptions,
+  VariableContext,
+  Variables,
+} from './types';
 import { normalizeScalaVersion } from './util';
 
 // type Vars = Record<string, string>;
@@ -33,6 +38,7 @@ interface Ctx {
   groupId?: string;
   artifactId?: string;
   currentValue?: string;
+  currentValueInfo?: VariableContext;
 
   currentVarName?: string;
   depType?: string;
@@ -48,17 +54,17 @@ const sbtVersionRegex = regEx(
   'sbt\\.version *= *(?<version>\\d+\\.\\d+\\.\\d+)'
 );
 
-const getLastDotAnnotation = (longVar: string): string =>
-  longVar.match('.') ? longVar.split('.').pop() ?? longVar : longVar;
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+const nestedVariableLiteral = (handler: q.SymMatcherHandler<Ctx>) =>
+  q.sym<Ctx>(handler).alt(q.many(q.op<Ctx>('.').sym(handler)));
 
 const scalaVersionMatch = q
   .sym<Ctx>('scalaVersion')
   .op(':=')
   .alt(
     q.str<Ctx>((ctx, { value: scalaVersion }) => ({ ...ctx, scalaVersion })),
-    q.sym<Ctx>((ctx, { value: varName }) => {
-      const varKey = getLastDotAnnotation(varName);
-      const scalaVersion = ctx.localVars[varKey] ?? ctx.globalVars[varKey];
+    nestedVariableLiteral((ctx, { value: varName }) => {
+      const scalaVersion = ctx.localVars[varName] ?? ctx.globalVars[varName];
       if (scalaVersion) {
         ctx.scalaVersion = scalaVersion.val;
       }
@@ -95,16 +101,14 @@ const packageFileVersionMatch = q
       ...ctx,
       packageFileVersion,
     })),
-    q.sym<Ctx>((ctx, { value: varName }) => {
-      const varKey = getLastDotAnnotation(varName);
-
+    nestedVariableLiteral((ctx, { value: varName }) => {
       const packageFileVersion =
-        ctx.localVars[varKey] ?? ctx.globalVars[varKey];
+        ctx.localVars[varName] ?? ctx.globalVars[varName];
       if (packageFileVersion) {
         ctx.packageFileVersion = packageFileVersion.val;
       }
       return ctx;
-    })
+    }) // support var1, var1.var2.var3
   );
 
 const variableNameMatch = q
@@ -136,8 +140,7 @@ const variableDefinitionMatch = q
 
 const groupIdMatch = q.alt<Ctx>(
   q.sym<Ctx>((ctx, { value: varName }) => {
-    const varKey = getLastDotAnnotation(varName);
-    const currentGroupId = ctx.localVars[varKey] ?? ctx.globalVars[varKey];
+    const currentGroupId = ctx.localVars[varName] ?? ctx.globalVars[varName];
     if (currentGroupId) {
       ctx.groupId = currentGroupId.val;
     }
@@ -148,8 +151,7 @@ const groupIdMatch = q.alt<Ctx>(
 
 const artifactIdMatch = q.alt<Ctx>(
   q.sym<Ctx>((ctx, { value: varName }) => {
-    const varKey = getLastDotAnnotation(varName);
-    const artifactId = ctx.localVars[varKey] ?? ctx.globalVars[varKey];
+    const artifactId = ctx.localVars[varName] ?? ctx.globalVars[varName];
     if (artifactId) {
       ctx.artifactId = artifactId.val;
     }
@@ -158,17 +160,19 @@ const artifactIdMatch = q.alt<Ctx>(
   q.str<Ctx>((ctx, { value: artifactId }) => ({ ...ctx, artifactId }))
 );
 
+const resolveVariable: q.SymMatcherHandler<Ctx> = (ctx, { value: varName }) => {
+  const currentValue = ctx.localVars[varName] ?? ctx.globalVars[varName];
+  if (currentValue) {
+    ctx.currentValue = currentValue.val;
+    ctx.currentValueInfo = currentValue;
+    ctx.variableName = varName;
+  }
+  return ctx;
+};
+
 const versionMatch = q.alt<Ctx>(
-  q.sym<Ctx>((ctx, { value: varName }) => {
-    const varKey = getLastDotAnnotation(varName);
-    const currentValue = ctx.localVars[varKey] ?? ctx.globalVars[varKey];
-    if (currentValue) {
-      ctx.currentValue = currentValue.val;
-      ctx.variableName = varKey;
-    }
-    return ctx;
-  }),
-  q.str<Ctx>((ctx, { value: currentValue }) => ({ ...ctx, currentValue }))
+  nestedVariableLiteral(resolveVariable), // support var1, var1.var2.var3
+  q.str<Ctx>((ctx, { value: currentValue }) => ({ ...ctx, currentValue })) // String literal "1.23.4"
 );
 
 const simpleDependencyMatch = groupIdMatch
@@ -200,6 +204,7 @@ function depHandler(ctx: Ctx): Ctx {
     useScalaVersion,
     depType,
     variableName,
+    currentValueInfo,
   } = ctx;
 
   delete ctx.groupId;
@@ -208,6 +213,7 @@ function depHandler(ctx: Ctx): Ctx {
   delete ctx.useScalaVersion;
   delete ctx.depType;
   delete ctx.variableName;
+  delete ctx.currentValueInfo;
 
   const depName = `${groupId!}:${artifactId!}`;
 
@@ -230,6 +236,10 @@ function depHandler(ctx: Ctx): Ctx {
   if (variableName) {
     dep.groupName = variableName;
     dep.variableName = variableName;
+    if (currentValueInfo) {
+      dep.fileReplacePosition = currentValueInfo.lineIndex;
+      dep.editFile = currentValueInfo.sourceFile;
+    }
   }
 
   ctx.deps.push(dep);
@@ -310,18 +320,20 @@ const query = q.tree<Ctx>({
 });
 
 // Extract 1 file
-function extractFile(
+export function extractPackageFile(
   content: string,
   {
     packageFile,
     registryUrls,
     variables,
     globalVariables,
+    scalaVersion,
   }: PackageFile & ParseOptions
 ): Ctx | null {
   if (
-    packageFile === 'project/build.properties' ||
-    packageFile.endsWith('/project/build.properties')
+    packageFile &&
+    (packageFile === 'project/build.properties' ||
+      packageFile.endsWith('/project/build.properties'))
   ) {
     const regexResult = sbtVersionRegex.exec(content);
     const sbtVersion = regexResult?.groups?.version;
@@ -335,6 +347,7 @@ function extractFile(
         currentValue: sbtVersion,
         replaceString: matchString,
         extractVersion: '^v(?<version>\\S+)',
+        editFile: packageFile,
       };
 
       return {
@@ -358,6 +371,7 @@ function extractFile(
       deps: [],
       registryUrls: [REGISTRY_URLS.mavenCentral, ...(registryUrls ?? [])],
       packageFile,
+      scalaVersion,
     });
     // console.log('parsedResult', packageFile, parsedResult);
   } catch (err) /* istanbul ignore next */ {
@@ -381,7 +395,7 @@ function prepareLoadPackageFiles(
   // Return variable
   let globalVariables: Variables = {};
   const registryUrls: string[] = [REGISTRY_URLS.mavenCentral];
-  let scalaVersion: string | null = null;
+  let scalaVersion: string | undefined = undefined;
   // Loop on all packageFiles content
   for (const { packageFile, content } of packageFilesContent) {
     const acc: PackageFile & ParseOptions = {
@@ -391,7 +405,7 @@ function prepareLoadPackageFiles(
       globalVariables: {},
       packageFile,
     };
-    const res = extractFile(content, acc);
+    const res = extractPackageFile(content, acc);
     // console.log('res ', packageFile, res);
     if (res) {
       globalVariables = { ...globalVariables, ...res.localVars };
@@ -445,7 +459,7 @@ export async function extractAllPackageFiles(
     // Extract package file by its group
     // local variable is share within its group
     for (const { packageFile, content } of packageFileContents) {
-      const res = extractFile(content, {
+      const res = extractPackageFile(content, {
         registryUrls,
         deps: [],
         packageFile,

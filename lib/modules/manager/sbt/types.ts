@@ -13,7 +13,7 @@ export type GroupFilenameContent = Record<
 export interface ParseOptions {
   packageFile?: string;
   isMultiDeps?: boolean;
-  scalaVersion?: string | null;
+  scalaVersion?: string;
   variables?: Variables;
   readonly globalVariables?: Variables;
 }
