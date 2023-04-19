@@ -14,6 +14,6 @@ export interface ParseOptions {
   packageFile?: string;
   isMultiDeps?: boolean;
   scalaVersion?: string;
-  variables?: Variables;
-  readonly globalVariables?: Variables;
+  localVars: Variables;
+  readonly globalVars: Variables;
 }

@@ -139,7 +139,7 @@ const variableDefinitionMatch = q
   .join(variableValueMatch);
 
 const groupIdMatch = q.alt<Ctx>(
-  q.sym<Ctx>((ctx, { value: varName }) => {
+  nestedVariableLiteral((ctx, { value: varName }) => {
     const currentGroupId = ctx.localVars[varName] ?? ctx.globalVars[varName];
     if (currentGroupId) {
       ctx.groupId = currentGroupId.val;
@@ -150,7 +150,7 @@ const groupIdMatch = q.alt<Ctx>(
 );
 
 const artifactIdMatch = q.alt<Ctx>(
-  q.sym<Ctx>((ctx, { value: varName }) => {
+  nestedVariableLiteral((ctx, { value: varName }) => {
     const artifactId = ctx.localVars[varName] ?? ctx.globalVars[varName];
     if (artifactId) {
       ctx.artifactId = artifactId.val;
@@ -325,8 +325,8 @@ export function extractPackageFile(
   {
     packageFile,
     registryUrls,
-    variables,
-    globalVariables,
+    localVars,
+    globalVars,
     scalaVersion,
   }: PackageFile & ParseOptions
 ): Ctx | null {
@@ -366,14 +366,13 @@ export function extractPackageFile(
 
   try {
     parsedResult = scala.query(content, query, {
-      globalVars: globalVariables!,
-      localVars: variables!,
+      globalVars,
+      localVars,
       deps: [],
       registryUrls: [REGISTRY_URLS.mavenCentral, ...(registryUrls ?? [])],
       packageFile,
       scalaVersion,
     });
-    // console.log('parsedResult', packageFile, parsedResult);
   } catch (err) /* istanbul ignore next */ {
     logger.warn({ err, packageFile }, 'Sbt parsing error');
   }
@@ -388,27 +387,27 @@ export function extractPackageFile(
 function prepareLoadPackageFiles(
   packageFilesContent: { packageFile: string; content: string }[]
 ): {
-  globalVariables: ParseOptions['globalVariables'];
+  globalVars: ParseOptions['globalVars'];
   registryUrls: string[];
   scalaVersion: ParseOptions['scalaVersion'];
 } {
   // Return variable
-  let globalVariables: Variables = {};
+  let globalVars: Variables = {};
   const registryUrls: string[] = [REGISTRY_URLS.mavenCentral];
   let scalaVersion: string | undefined = undefined;
-  // Loop on all packageFiles content
+
   for (const { packageFile, content } of packageFilesContent) {
     const acc: PackageFile & ParseOptions = {
-      deps: [], // unused but mandatory
+      deps: [],
       registryUrls,
-      variables: globalVariables,
-      globalVariables: {},
+      localVars: globalVars,
+      globalVars: {},
       packageFile,
     };
     const res = extractPackageFile(content, acc);
-    // console.log('res ', packageFile, res);
+
     if (res) {
-      globalVariables = { ...globalVariables, ...res.localVars };
+      globalVars = { ...globalVars, ...res.localVars };
       if (res.registryUrls) {
         registryUrls.push(...res.registryUrls);
       }
@@ -419,7 +418,7 @@ function prepareLoadPackageFiles(
   }
 
   return {
-    globalVariables,
+    globalVars,
     registryUrls,
     scalaVersion,
   };
@@ -446,12 +445,10 @@ export async function extractAllPackageFiles(
   // 1. globalVariables from project/ and root package file
   // 2. registry from all package file
   // 3. Project's scalaVersion - use in parseDepExpr to add suffix eg. "_2.13"
-  const { globalVariables, registryUrls, scalaVersion } =
-    prepareLoadPackageFiles([
-      ...(groupPackageFileContent['project'] ?? []), // in project/ folder
-      ...(groupPackageFileContent['.'] ?? []), // root
-    ]);
-  logger.debug(JSON.stringify(globalVariables));
+  const { globalVars, registryUrls, scalaVersion } = prepareLoadPackageFiles([
+    ...(groupPackageFileContent['project'] ?? []), // in project/ folder
+    ...(groupPackageFileContent['.'] ?? []), // root
+  ]);
 
   const mapDepsToPackageFile: Record<string, PackageDependency[]> = {};
   // Start extract all package files
@@ -464,8 +461,8 @@ export async function extractAllPackageFiles(
         deps: [],
         packageFile,
         scalaVersion,
-        variables: {},
-        globalVariables,
+        localVars: {},
+        globalVars,
       });
       if (res) {
         if (res?.deps) {
